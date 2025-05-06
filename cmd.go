@@ -7,8 +7,10 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -26,134 +28,22 @@ const (
 // Constants for wire-related strings
 const (
 	NewSetStr     = "NewSet"
-	ProviderStr   = "Provider"
 	UnionStr      = "Union"
 	PreWireSetStr = "PreWireSet"
 )
 
-// getModuleName reads the module name from the go.mod file
-func getModuleName() (string, error) {
-	// Find the go.mod file by traversing up the directory tree
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-		if _, err := os.Stat(goModPath); err == nil {
-			// Found go.mod, now read it to extract the module name
-			file, err := os.Open(goModPath)
-			if err != nil {
-				return "", fmt.Errorf("failed to open go.mod: %w", err)
-			}
-			defer file.Close()
-
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, "module ") {
-					// Extract the module name
-					moduleName := strings.TrimSpace(strings.TrimPrefix(line, "module "))
-					return moduleName, nil
-				}
-			}
-
-			if err := scanner.Err(); err != nil {
-				return "", fmt.Errorf("failed to read go.mod: %w", err)
-			}
-
-			return "", fmt.Errorf("module declaration not found in go.mod")
-		}
-
-		// Move up one directory
-		parentDir := filepath.Dir(dir)
-		if parentDir == dir {
-			// Reached the root directory without finding go.mod
-			return "", fmt.Errorf("go.mod not found in any parent directory")
-		}
-		dir = parentDir
-	}
-}
-
-// findPreWireSetInCurrentPackage finds the PreWireSet variable and collects imports in the current package
-func findPreWireSetInCurrentPackage() (string, *ast.ValueSpec, ast.Expr, map[string]string, *token.FileSet, error) {
-	// Get the current directory
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Parse the package in the current directory
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
-	if err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("failed to parse directory: %w", err)
-	}
-
-	// Find the PreWireSet variable and collect imports
-	var packageName string
-	var preWireSet *ast.ValueSpec
-	var preWireSetExpr ast.Expr
-	imports := make(map[string]string) // Import path -> alias
-
-	for pkgName, pkg := range pkgs {
-		packageName = pkgName
-		for _, file := range pkg.Files {
-			// Collect imports
-			for _, imp := range file.Imports {
-				path := strings.Trim(imp.Path.Value, "\"")
-				var alias string
-				if imp.Name != nil {
-					alias = imp.Name.Name
-				} else {
-					// Extract the package name from the import path
-					parts := strings.Split(path, "/")
-					alias = parts[len(parts)-1]
-				}
-				imports[path] = alias
-			}
-
-			// Find the PreWireSet variable
-			ast.Inspect(file, func(n ast.Node) bool {
-				if decl, ok := n.(*ast.GenDecl); ok && decl.Tok == token.VAR {
-					for _, spec := range decl.Specs {
-						if valueSpec, ok := spec.(*ast.ValueSpec); ok {
-							for i, name := range valueSpec.Names {
-								if name.Name == PreWireSetStr {
-									preWireSet = valueSpec
-									if i < len(valueSpec.Values) {
-										preWireSetExpr = valueSpec.Values[i]
-									}
-									return false
-								}
-							}
-						}
-					}
-				}
-				return true
-			})
-
-			if preWireSet != nil {
-				break
-			}
-		}
-		if preWireSet != nil {
-			break
-		}
-	}
-
-	if preWireSet == nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("%s variable not found in package", PreWireSetStr)
-	}
-
-	return packageName, preWireSet, preWireSetExpr, imports, fset, nil
+type preWireSetData struct {
+	packageName string
+	preWireSet  *ast.ValueSpec
+	expr        ast.Expr
+	imports     map[string]string
+	fset        *token.FileSet
 }
 
 // PrewireCommand is the main entry point for the prewire command
 func PrewireCommand() error {
 	// Find the PreWireSet variable and collect imports
-	packageName, _, preWireSetExpr, imports, fset, err := findPreWireSetInCurrentPackage()
+	preData, err := findPreWireSetInCurrentPackage()
 	if err != nil {
 		return err
 	}
@@ -166,7 +56,7 @@ func PrewireCommand() error {
 
 	// Generate the new file
 	outputFile := filepath.Join(dir, GenFile)
-	err = generateWireFile(outputFile, packageName, imports, preWireSetExpr, fset)
+	err = generateWireFile(outputFile, preData)
 	if err != nil {
 		return fmt.Errorf("failed to generate prewire file: %w", err)
 	}
@@ -175,10 +65,91 @@ func PrewireCommand() error {
 	return nil
 }
 
+// findPreWireSetInCurrentPackage finds the PreWireSet variable and collects imports in the current package
+func findPreWireSetInCurrentPackage() (preWireSetData, error) {
+	// Get the current directory
+	dir, err := os.Getwd()
+	if err != nil {
+		return preWireSetData{}, fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Parse the package in the current directory
+	fset := token.NewFileSet()
+	pkgMap, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	pkgs := slices.Collect(maps.Values(pkgMap))
+	if len(pkgs) != 1 {
+		return preWireSetData{}, fmt.Errorf("should have found 1 and only one package, but found %v", pkgs)
+	}
+	pkg := pkgs[0]
+
+	if err != nil {
+		return preWireSetData{}, fmt.Errorf("failed to parse directory: %w", err)
+	}
+
+	// Find the PreWireSet variable and collect imports
+	var preWireSet *ast.ValueSpec
+	var preWireSetExpr ast.Expr
+	var preWireSetFile *ast.File
+	imports := make(map[string]string) // Import path -> alias
+
+	for _, file := range pkg.Files {
+		// Find the PreWireSet variable
+		ast.Inspect(file, func(n ast.Node) bool {
+			if decl, ok := n.(*ast.GenDecl); ok && decl.Tok == token.VAR {
+				for _, spec := range decl.Specs {
+					if valueSpec, ok := spec.(*ast.ValueSpec); ok {
+						for i, name := range valueSpec.Names {
+							if name.Name == PreWireSetStr {
+								preWireSet = valueSpec
+								preWireSetFile = file
+								if i < len(valueSpec.Values) {
+									preWireSetExpr = valueSpec.Values[i]
+								}
+								return false
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+
+		if preWireSet != nil {
+			break
+		}
+	}
+
+	if preWireSet == nil {
+		return preWireSetData{}, fmt.Errorf("%s variable not found in package %s", PreWireSetStr, pkg.Name)
+	}
+
+	// Collect imports
+	for _, imp := range preWireSetFile.Imports {
+		path := strings.Trim(imp.Path.Value, "\"")
+		var alias string
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		} else {
+			// Extract the package name from the import path
+			parts := strings.Split(path, "/")
+			alias = parts[len(parts)-1]
+		}
+		imports[path] = alias
+	}
+
+	return preWireSetData{
+		pkg.Name,
+		preWireSet,
+		preWireSetExpr,
+		imports,
+		fset,
+	}, nil
+}
+
 // generateWireFile generates a new Go file with a static representation of the wire set
-func generateWireFile(outputFile, packageName string, imports map[string]string, preWireSetExpr ast.Expr, fset *token.FileSet) error {
+func generateWireFile(outputFile string, preData preWireSetData) error {
 	// Extract provider functions and import paths from the PreWireSet expression
-	providerFuncs, importPaths, err := extractProviderFunctions(preWireSetExpr, fset)
+	providerFuncs, importPaths, err := extractProviderFunctions(preData.expr, preData.fset)
 	if err != nil {
 		return fmt.Errorf("failed to extract provider functions: %w", err)
 	}
@@ -205,7 +176,7 @@ func generateWireFile(outputFile, packageName string, imports map[string]string,
 	content.WriteString(genStr)
 
 	// Add package declaration
-	content.WriteString(fmt.Sprintf("package %s\n\n", packageName))
+	content.WriteString(fmt.Sprintf("package %s\n\n", preData.packageName))
 
 	// Add imports
 	content.WriteString("import (\n")
@@ -233,7 +204,7 @@ func generateWireFile(outputFile, packageName string, imports map[string]string,
 
 	// Create a map of package name to import path
 	packageToImport := make(map[string]string)
-	for path, alias := range imports {
+	for path, alias := range preData.imports {
 		packageToImport[alias] = path
 	}
 
@@ -330,7 +301,7 @@ func resolvePackageWithCache(importPath string) (string, error) {
 }
 
 // findPackageDir finds the package directory based on the import path
-func findPackageDir(importPath, moduleName string) (string, string, error) {
+func findPackageDir(importPath string) (string, string, error) {
 	// Use go/packages to resolve the package
 	dir, err := resolvePackageWithCache(importPath)
 	if err != nil {
@@ -487,7 +458,7 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 							importPaths = append(importPaths, importPath)
 
 							// Find the package directory based on the import path
-							pkgDir, updatedImportPath, err := findPackageDir(importPath, moduleName)
+							pkgDir, updatedImportPath, err := findPackageDir(importPath)
 							if err != nil {
 								return nil, nil, err
 							}
@@ -532,20 +503,57 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 							providerFuncs = append(providerFuncs, "unknown.New")
 						}
 					}
-				} else if ident, ok := arg.(*ast.Ident); ok {
-					// This is a reference to a PreWireSet in the current package
-					if strings.HasSuffix(ident.Name, PreWireSetStr) {
-						// We can't resolve this without more context, so use a placeholder
-						pkgName := strings.TrimSuffix(ident.Name, "."+PreWireSetStr)
-						if pkgName == "" {
-							pkgName = "unknown"
-						}
-						providerFuncs = append(providerFuncs, fmt.Sprintf("%s.New", pkgName))
-					}
+				} else if _, ok := arg.(*ast.Ident); ok {
+					return nil, nil, fmt.Errorf("only one PreWireSet is allowed per package")
 				}
 			}
 		}
 	}
 
 	return providerFuncs, importPaths, nil
+}
+
+// getModuleName reads the module name from the go.mod file
+func getModuleName() (string, error) {
+	// Find the go.mod file by traversing up the directory tree
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			// Found go.mod, now read it to extract the module name
+			file, err := os.Open(goModPath)
+			if err != nil {
+				return "", fmt.Errorf("failed to open go.mod: %w", err)
+			}
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "module ") {
+					// Extract the module name
+					moduleName := strings.TrimSpace(strings.TrimPrefix(line, "module "))
+					return moduleName, nil
+				}
+			}
+
+			if err := scanner.Err(); err != nil {
+				return "", fmt.Errorf("failed to read go.mod: %w", err)
+			}
+
+			return "", fmt.Errorf("module declaration not found in go.mod")
+		}
+
+		// Move up one directory
+		parentDir := filepath.Dir(dir)
+		if parentDir == dir {
+			// Reached the root directory without finding go.mod
+			return "", fmt.Errorf("go.mod not found in any parent directory")
+		}
+		dir = parentDir
+	}
 }
