@@ -1,4 +1,4 @@
-package prewire
+package main
 
 import (
 	"fmt"
