@@ -1,7 +1,6 @@
 package prewire
 
 import (
-	"bufio"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -142,7 +141,7 @@ func findPreWireSet(pkgDir string) (preWireSetData, error) {
 // generateWireFile generates a new Go file with a static representation of the wire set
 func generateWireFile(outputFile string, preData preWireSetData) error {
 	// Extract provider functions and import paths from the PreWireSet expression
-	providerFuncs, importPaths, err := extractProviderFunctions(preData.expr, preData.fset)
+	providerFuncs, importPaths, err := extractProviderFunctions(preData, preData.fset)
 	if err != nil {
 		return fmt.Errorf("failed to extract provider functions: %w", err)
 	}
@@ -311,12 +310,12 @@ func findPackageDir(importPath string) (string, string, error) {
 }
 
 // extractProviderFunctions extracts provider functions from a PreWireSet expression
-func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []string, error) {
+func extractProviderFunctions(preData preWireSetData, fset *token.FileSet) ([]string, []string, error) {
 	var providerFuncs []string
 	var importPaths []string
 
 	// Process the expression based on its type
-	switch e := expr.(type) {
+	switch e := preData.expr.(type) {
 	case *ast.CallExpr:
 		// Check if it's a prewire.NewSet call
 		if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == NewSetStr {
@@ -338,10 +337,12 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 	}
 
 	// Check if there's a Union call
-	if callExpr, ok := expr.(*ast.CallExpr); ok {
+	if callExpr, ok := preData.expr.(*ast.CallExpr); ok {
 		if selExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok && selExpr.Sel.Name == UnionStr {
 			// Process the receiver of the Union call
-			receiverFuncs, receiverImports, err := extractProviderFunctions(selExpr.X, fset)
+			recieverPreData := preData
+			recieverPreData.expr = selExpr.X
+			receiverFuncs, receiverImports, err := extractProviderFunctions(recieverPreData, fset)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -360,59 +361,17 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 							return nil, nil, fmt.Errorf("failed to extract package name from %s", sel.Sel.Name)
 						}
 						pkgName = ident.Name
+
 						// Find the import path for this package by looking at the imports in the current file
 						var importPath string
-						moduleName, err := getModuleName()
-						if err != nil {
-							return nil, nil, fmt.Errorf("failed to get module name: %w", err)
-						}
-
-						// First, try to find the import path by looking at the imports in the current file
-						// Parse the current file
-						currentDir, err := os.Getwd()
-						if err != nil {
-							return nil, nil, fmt.Errorf("failed to get current directory: %w", err)
-						}
-						currentFset := token.NewFileSet()
-						currentPkgs, err := parser.ParseDir(currentFset, currentDir, nil, parser.ParseComments)
-						if err != nil {
-							return nil, nil, fmt.Errorf("failed to parse current directory: %w", err)
-						}
-
-						// Look for an import that ends with the package name
-						found := false
-						for _, pkg := range currentPkgs {
-							for _, file := range pkg.Files {
-								for _, imp := range file.Imports {
-									path := strings.Trim(imp.Path.Value, "\"")
-									// Check if the import path ends with the package name
-									if strings.HasSuffix(path, "/"+pkgName) {
-										importPath = path
-										found = true
-										break
-									}
-									// Also check if the import path contains the package name as a directory component
-									pathParts := strings.Split(path, "/")
-									for i, part := range pathParts {
-										if part == pkgName && i < len(pathParts)-1 {
-											importPath = path
-											found = true
-											break
-										}
-									}
-								}
-								if found {
-									break
-								}
-							}
-							if found {
+						for path, name := range preData.imports {
+							if name == pkgName {
+								importPath = path
 								break
 							}
 						}
-
-						// If we couldn't find the import path, use a default
-						if !found {
-							importPath = fmt.Sprintf("%s/pkg/%s", moduleName, pkgName)
+						if importPath == "" {
+							return nil, nil, fmt.Errorf("failed to resolve import path for %s", pkgName)
 						}
 						importPaths = append(importPaths, importPath)
 
@@ -437,7 +396,7 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 						// Create a new file set for parsing
 						newFset := token.NewFileSet()
 						// Extract provider functions from the PreWireSet
-						pkgProviderFuncs, pkgImportPaths, err := extractProviderFunctions(newPreData.expr, newFset)
+						pkgProviderFuncs, pkgImportPaths, err := extractProviderFunctions(newPreData, newFset)
 						if err != nil {
 							return nil, nil, fmt.Errorf("failed to extract provider functions from package %s: %w", pkgName, err)
 						}
@@ -461,49 +420,4 @@ func extractProviderFunctions(expr ast.Expr, fset *token.FileSet) ([]string, []s
 	}
 
 	return providerFuncs, importPaths, nil
-}
-
-// getModuleName reads the module name from the go.mod file
-func getModuleName() (string, error) {
-	// Find the go.mod file by traversing up the directory tree
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-		if _, err := os.Stat(goModPath); err == nil {
-			// Found go.mod, now read it to extract the module name
-			file, err := os.Open(goModPath)
-			if err != nil {
-				return "", fmt.Errorf("failed to open go.mod: %w", err)
-			}
-			defer file.Close()
-
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, "module ") {
-					// Extract the module name
-					moduleName := strings.TrimSpace(strings.TrimPrefix(line, "module "))
-					return moduleName, nil
-				}
-			}
-
-			if err := scanner.Err(); err != nil {
-				return "", fmt.Errorf("failed to read go.mod: %w", err)
-			}
-
-			return "", fmt.Errorf("module declaration not found in go.mod")
-		}
-
-		// Move up one directory
-		parentDir := filepath.Dir(dir)
-		if parentDir == dir {
-			// Reached the root directory without finding go.mod
-			return "", fmt.Errorf("go.mod not found in any parent directory")
-		}
-		dir = parentDir
-	}
 }
