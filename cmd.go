@@ -236,77 +236,8 @@ func generateWireFile(outputFile string, preData preWireSetData) error {
 
 	content.WriteString(")\n")
 
-	contentStr := content.String()
-	if strings.Contains(contentStr, "github.com/cmaher/primordium/pkg/controller/roll/api") {
-		fmt.Println("whyyyyy")
-	}
-
 	// Write the file
-	return os.WriteFile(outputFile, []byte(contentStr), 0644)
-}
-
-// Cache for package directory lookups
-var packageDirCache = make(map[string]string)
-var packageDirCacheMutex sync.RWMutex
-
-// resolvePackage resolves a package path to its directory using go/packages API
-func resolvePackage(importPath string) (string, error) {
-	cfg := &packages.Config{
-		Mode: packages.NeedFiles,
-		Dir:  ".", // Current directory
-	}
-
-	pkgs, err := packages.Load(cfg, importPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to load package %s: %w", importPath, err)
-	}
-
-	if len(pkgs) == 0 {
-		return "", fmt.Errorf("package %s not found", importPath)
-	}
-
-	if len(pkgs[0].GoFiles) == 0 {
-		return "", fmt.Errorf("package %s has no Go files", importPath)
-	}
-
-	// Return the directory of the first Go file
-	return filepath.Dir(pkgs[0].GoFiles[0]), nil
-}
-
-// resolvePackageWithCache resolves a package path with caching for performance
-func resolvePackageWithCache(importPath string) (string, error) {
-	// Check cache first
-	packageDirCacheMutex.RLock()
-	if dir, ok := packageDirCache[importPath]; ok {
-		packageDirCacheMutex.RUnlock()
-		return dir, nil
-	}
-	packageDirCacheMutex.RUnlock()
-
-	// Not in cache, resolve it
-	dir, err := resolvePackage(importPath)
-	if err != nil {
-		return "", err
-	}
-
-	// Add to cache
-	packageDirCacheMutex.Lock()
-	packageDirCache[importPath] = dir
-	packageDirCacheMutex.Unlock()
-
-	return dir, nil
-}
-
-// findPackageDir finds the package directory based on the import path
-func findPackageDir(importPath string) (string, string, error) {
-	// Use go/packages to resolve the package
-	dir, err := resolvePackageWithCache(importPath)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve package %s: %w", importPath, err)
-	}
-
-	// Successfully resolved the package
-	return dir, importPath, nil
+	return os.WriteFile(outputFile, []byte(content.String()), 0644)
 }
 
 // extractProviderFunctions extracts provider functions from a PreWireSet expression
@@ -420,4 +351,68 @@ func extractProviderFunctions(preData preWireSetData, fset *token.FileSet) ([]st
 	}
 
 	return providerFuncs, importPaths, nil
+}
+
+// Cache for package directory lookups
+var packageDirCache = make(map[string]string)
+var packageDirCacheMutex sync.RWMutex
+
+// resolvePackage resolves a package path to its directory using go/packages API
+func resolvePackage(importPath string) (string, error) {
+	cfg := &packages.Config{
+		Mode: packages.NeedFiles,
+		Dir:  ".", // Current directory
+	}
+
+	pkgs, err := packages.Load(cfg, importPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to load package %s: %w", importPath, err)
+	}
+
+	if len(pkgs) == 0 {
+		return "", fmt.Errorf("package %s not found", importPath)
+	}
+
+	if len(pkgs[0].GoFiles) == 0 {
+		return "", fmt.Errorf("package %s has no Go files", importPath)
+	}
+
+	// Return the directory of the first Go file
+	return filepath.Dir(pkgs[0].GoFiles[0]), nil
+}
+
+// resolvePackageWithCache resolves a package path with caching for performance
+func resolvePackageWithCache(importPath string) (string, error) {
+	// Check cache first
+	packageDirCacheMutex.RLock()
+	if dir, ok := packageDirCache[importPath]; ok {
+		packageDirCacheMutex.RUnlock()
+		return dir, nil
+	}
+	packageDirCacheMutex.RUnlock()
+
+	// Not in cache, resolve it
+	dir, err := resolvePackage(importPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Add to cache
+	packageDirCacheMutex.Lock()
+	packageDirCache[importPath] = dir
+	packageDirCacheMutex.Unlock()
+
+	return dir, nil
+}
+
+// findPackageDir finds the package directory based on the import path
+func findPackageDir(importPath string) (string, string, error) {
+	// Use go/packages to resolve the package
+	dir, err := resolvePackageWithCache(importPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve package %s: %w", importPath, err)
+	}
+
+	// Successfully resolved the package
+	return dir, importPath, nil
 }

@@ -23,7 +23,7 @@ initial set of providers for that specific package.
 package mypackage
 
 import (
-	"github.com/cmaher/prewire" 
+	"github.com/cmaher/prewire"
 	// Import any packages needed by your providers
 )
 
@@ -106,7 +106,7 @@ func BuildApp() (App, error) {
 
 ```
 
-## Example with Union
+## Including Additional PreWireSets
 
 The power of `prewire` comes from its ability to union `PreWireSet`s from different packages while automatically
 handling duplicate providers.
@@ -222,3 +222,17 @@ that the static `WireSet` is available when `wire` runs.
 By using `prewire`, you can compose complex dependency graphs from smaller, reusable, and self-contained `PreWireSet`s
 defined across your project, with automatic de-duplication of identical provider functions handled by the pre-generation
 step.
+
+## Known Limitations
+
+This package is not particularly robust, and it is built with a very specific usage in mind. It has the following
+limitations:
+
+* The variable defining the set MUST be named `PreWireSet`
+* Only one PreWireSet is allowed per package
+* Variables in the call to Union MUST be named `<package>.PreWireSet`
+* This probably does not work with `wire.Bind` or anything else that is not a provider function
+* Package names of unioned `PreWireSet`s MUST be either the final name in the package string, or a package alias
+
+I'm not opposed to fixing any of this, but this solves my current problems, and it was also partly an exercise in seeing
+how far I could take vibe coding for something technically complicated. 
