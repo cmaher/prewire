@@ -233,6 +233,7 @@ limitations:
 * Variables in the call to Union MUST be named `<package>.PreWireSet`
 * This probably does not work with `wire.Bind` or anything else that is not a provider function
 * Package names of unioned `PreWireSet`s MUST be either the final name in the package string, or a package alias
+* This relies on `go generate` re-generating files in alphabetical order in order for the wire.go to use the updated prewire_gen.go. You can work around this with a gen.go containing both commands in order, but that adds duplicate generate calls without further cleanup.
 
 I'm not opposed to fixing any of this, but this solves my current problems, and it was also partly an exercise in seeing
 how far I could take vibe coding for something technically complicated. 
