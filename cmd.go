@@ -220,7 +220,18 @@ func generateWireFile(outputFile string, preData preWireSetData) error {
 
 	// Write all imports in alphabetical order
 	for _, path := range importPaths2 {
-		content.WriteString(fmt.Sprintf("\t\"%s\"\n", path))
+		alias := preData.imports[path]
+		// Check if the alias is different from the last part of the path
+		parts := strings.Split(path, "/")
+		defaultAlias := parts[len(parts)-1]
+
+		if alias != defaultAlias {
+			// If there's a custom alias, include it in the import
+			content.WriteString(fmt.Sprintf("\t%s \"%s\"\n", alias, path))
+		} else {
+			// Otherwise, just write the import path
+			content.WriteString(fmt.Sprintf("\t\"%s\"\n", path))
+		}
 	}
 
 	content.WriteString(")\n\n")
