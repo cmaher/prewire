@@ -170,6 +170,24 @@ func generateWireFile(outputFile string, preData preWireSetData) error {
 	// Add package declaration
 	content.WriteString(fmt.Sprintf("package %s\n\n", preData.packageName))
 
+	writeImports(&content, importPaths, providerFuncs, preData)
+
+	// Add WireSet variable
+	content.WriteString("// WireSet is the provider set for this package\n")
+	content.WriteString("var WireSet = wire.NewSet(\n")
+
+	// Add provider functions
+	for _, providerFunc := range providerFuncs {
+		content.WriteString(fmt.Sprintf("\t%s,\n", providerFunc))
+	}
+
+	content.WriteString(")\n")
+
+	// Write the file
+	return os.WriteFile(outputFile, []byte(content.String()), 0644)
+}
+
+func writeImports(content *strings.Builder, importPaths []string, providerFuncs []string, preData preWireSetData) {
 	// Add imports
 	content.WriteString("import (\n")
 	// Add github.com/google/wire
@@ -208,18 +226,18 @@ func generateWireFile(outputFile string, preData preWireSetData) error {
 	}
 
 	// Get all import paths except wire and prewire
-	var importPaths2 []string
+	var trimmedImportPaths []string
 	for path := range allImports {
 		if path != WireImportPath && path != PrewireImportPath {
-			importPaths2 = append(importPaths2, path)
+			trimmedImportPaths = append(trimmedImportPaths, path)
 		}
 	}
 
 	// Sort import paths alphabetically
-	sort.Strings(importPaths2)
+	sort.Strings(trimmedImportPaths)
 
 	// Write all imports in alphabetical order
-	for _, path := range importPaths2 {
+	for _, path := range trimmedImportPaths {
 		alias := preData.imports[path]
 		// Check if the alias is different from the last part of the path
 		parts := strings.Split(path, "/")
@@ -235,20 +253,6 @@ func generateWireFile(outputFile string, preData preWireSetData) error {
 	}
 
 	content.WriteString(")\n\n")
-
-	// Add WireSet variable
-	content.WriteString("// WireSet is the provider set for this package\n")
-	content.WriteString("var WireSet = wire.NewSet(\n")
-
-	// Add provider functions
-	for _, providerFunc := range providerFuncs {
-		content.WriteString(fmt.Sprintf("\t%s,\n", providerFunc))
-	}
-
-	content.WriteString(")\n")
-
-	// Write the file
-	return os.WriteFile(outputFile, []byte(content.String()), 0644)
 }
 
 // extractProviderFunctions extracts provider functions from a PreWireSet expression
@@ -351,6 +355,8 @@ func extractProviderFunctions(preData preWireSetData, fset *token.FileSet) ([]st
 							}
 						}
 
+						addUnionedImports(&preData, newPreData)
+
 						providerFuncs = append(providerFuncs, pkgProviderFuncs...)
 						importPaths = append(importPaths, pkgImportPaths...)
 					}
@@ -362,6 +368,21 @@ func extractProviderFunctions(preData preWireSetData, fset *token.FileSet) ([]st
 	}
 
 	return providerFuncs, importPaths, nil
+}
+
+func addUnionedImports(preData *preWireSetData, newPreData preWireSetData) {
+	// Also add any aliased imports from the unionized package to the parent package's imports
+	for path, alias := range newPreData.imports {
+		if path != PrewireImportPath && path != WireImportPath {
+			// If this is an aliased import, add the alias to the parent package's imports
+			parts := strings.Split(path, "/")
+			defaultAlias := parts[len(parts)-1]
+			if alias != defaultAlias {
+				// Add the alias to the parent package's imports
+				preData.imports[path] = alias
+			}
+		}
+	}
 }
 
 // Cache for package directory lookups
